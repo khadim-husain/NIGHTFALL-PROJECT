@@ -1,0 +1,253 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Project Nightfall — Smart Printing Operations Platform API",
+    "version": "1.0.0",
+    "description": "Production REST API for monitoring, queue orchestration, server-side pricing, and hardware management across automated smart printing kiosk networks."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8000/api/v1",
+      "description": "Local Development / Staging Server"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Firebase ID Token or Development Session JWT"
+      },
+      "KioskIdAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-kiosk-id",
+        "description": "Provisioned Kiosk Identifier (e.g. K01-K12)"
+      },
+      "KioskKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-kiosk-key",
+        "description": "Provisioned Kiosk Secret Key (hashed via SHA-256 server-side)"
+      }
+    },
+    "schemas": {
+      "StandardError": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": false },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": { "type": "string", "example": "BAD_REQUEST" },
+              "message": { "type": "string", "example": "Detailed failure reason" },
+              "details": { "type": "object" }
+            }
+          }
+        }
+      },
+      "Kiosk": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "example": "K05" },
+          "name": { "type": "string", "example": "Floor Center 1" },
+          "zone": { "type": "string", "example": "Zone B" },
+          "zoneLabel": { "type": "string", "example": "Main Floor" },
+          "status": { "type": "string", "enum": ["Online", "Idle", "Busy", "Offline", "Error"] },
+          "ipAddress": { "type": "string", "example": "192.168.1.105" },
+          "queueLength": { "type": "integer", "example": 1 },
+          "totalPrints": { "type": "integer", "example": 1248 },
+          "temperature": { "type": "number", "example": 38 },
+          "paperLevel": { "type": "integer", "example": 62 },
+          "inkLevel": { "type": "integer", "example": 74 },
+          "coordinates": {
+            "type": "object",
+            "properties": {
+              "x": { "type": "number", "example": -0.8 },
+              "y": { "type": "number", "example": 0 },
+              "z": { "type": "number", "example": 1.5 }
+            }
+          }
+        }
+      },
+      "PrintOrder": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "example": "#NF-1048" },
+          "documentName": { "type": "string", "example": "Design_Print_v3.pdf" },
+          "fileSize": { "type": "string", "example": "14.2 MB" },
+          "fileType": { "type": "string", "example": "pdf" },
+          "kioskId": { "type": "string", "example": "K05" },
+          "customerName": { "type": "string", "example": "Alex Rivera" },
+          "customerEmail": { "type": "string", "example": "alex.rivera@designstudio.io" },
+          "status": { "type": "string", "enum": ["Pending", "Queued", "Printing", "Completed", "Failed", "Cancelled"] },
+          "paymentStatus": { "type": "string", "enum": ["Pending", "Paid", "Refunded"] },
+          "progress": { "type": "integer", "example": 68 },
+          "copies": { "type": "integer", "example": 2 },
+          "pageCount": { "type": "integer", "example": 24 },
+          "colorMode": { "type": "string", "enum": ["Color", "Monochrome"] },
+          "paperSize": { "type": "string", "enum": ["A4", "A3", "Letter"] },
+          "duplex": { "type": "boolean", "example": true },
+          "totalAmount": { "type": "number", "example": 18.5 },
+          "estimatedCompletion": { "type": "string", "example": "2 min remaining" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "description": "Verifies server runtime and authoritative PostgreSQL connectivity.",
+        "responses": {
+          "200": { "description": "Database and API healthy" },
+          "503": { "description": "Service unhealthy or database unreachable" }
+        }
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "summary": "User & Administrator Login",
+        "description": "Authenticates user credentials and issues verified session token.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email", "password"],
+                "properties": {
+                  "email": { "type": "string", "example": "admin@nightfall.io" },
+                  "password": { "type": "string", "example": "nightfall-enterprise" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Login successful" },
+          "401": { "description": "Invalid credentials" }
+        }
+      }
+    },
+    "/kiosks": {
+      "get": {
+        "summary": "List all 12 kiosks",
+        "description": "Returns authoritative fleet status, telemetry, coordinates, and active queue counts across all 3 zones.",
+        "responses": {
+          "200": {
+            "description": "Array of 12 kiosks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/Kiosk" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/kiosks/{kioskId}/jobs/claim": {
+      "post": {
+        "summary": "Atomic Job Claim Lease",
+        "description": "Kiosk worker claims the next queued print job. Uses atomic row updates with optimistic locking to prevent double-claiming.",
+        "security": [{ "KioskIdAuth": [], "KioskKeyAuth": [] }],
+        "parameters": [
+          { "name": "kioskId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Job successfully leased to this kiosk with signed document download URL" },
+          "204": { "description": "No queued jobs available for this kiosk" },
+          "401": { "description": "Kiosk authentication failure" },
+          "403": { "description": "Kiosk credentials revoked or mismatch" }
+        }
+      }
+    },
+    "/orders": {
+      "get": {
+        "summary": "List orders",
+        "description": "Returns filterable print orders ledger.",
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string" } },
+          { "name": "kioskId", "in": "query", "schema": { "type": "string" } },
+          { "name": "page", "in": "query", "schema": { "type": "integer" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Orders ledger matching query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/PrintOrder" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create Print Order",
+        "description": "Submits document print order. Price is strictly calculated by server rules.",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["documentId", "kioskId"],
+                "properties": {
+                  "documentId": { "type": "string" },
+                  "kioskId": { "type": "string", "example": "K05" },
+                  "copies": { "type": "integer", "default": 1 },
+                  "colorMode": { "type": "string", "enum": ["Color", "Monochrome"] },
+                  "paperSize": { "type": "string", "enum": ["A4", "A3", "Letter"] },
+                  "duplex": { "type": "boolean", "default": true }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Order created in Pending status" },
+          "400": { "description": "Invalid parameters" },
+          "401": { "description": "Unauthorized" }
+        }
+      }
+    },
+    "/payments/simulate": {
+      "post": {
+        "summary": "Execute Simulated Payment",
+        "description": "Simulates payment completion with mandatory idempotency key. Upon success, releases print job to kiosk queue.",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["orderId", "idempotencyKey"],
+                "properties": {
+                  "orderId": { "type": "string", "example": "#NF-1048" },
+                  "idempotencyKey": { "type": "string", "example": "pay_idemp_9921_x3" },
+                  "cardLast4": { "type": "string", "default": "4242" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Payment processed, print job created in QUEUED state" },
+          "200": { "description": "Idempotent duplicate request; original payment returned without double charging" },
+          "400": { "description": "Order already paid or invalid state" }
+        }
+      }
+    }
+  }
+}
+

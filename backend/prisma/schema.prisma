@@ -1,0 +1,330 @@
+// Project Nightfall - PostgreSQL Schema
+// Authoritative Database Schema for Orders, Payments, Kiosks, Print Jobs, and Operational Records
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  CUSTOMER
+  OPERATOR
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum KioskStatus {
+  Online
+  Idle
+  Busy
+  Offline
+  Error
+}
+
+enum DocumentStatus {
+  UPLOADED
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum ColorMode {
+  Color
+  Monochrome
+}
+
+enum PaperSize {
+  A4
+  A3
+  Letter
+}
+
+enum OrderStatus {
+  Pending
+  Queued
+  Printing
+  Completed
+  Failed
+  Cancelled
+}
+
+enum PaymentStatus {
+  Pending
+  Paid
+  Refunded
+}
+
+enum PaymentProvider {
+  SIMULATED
+  STRIPE
+}
+
+enum PaymentState {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+enum PrintJobStatus {
+  QUEUED
+  CLAIMED
+  PRINTING
+  COMPLETED
+  FAILED
+  UNCERTAIN
+}
+
+enum AttemptOutcome {
+  SUCCESS
+  FAILURE
+  ABORTED
+  TIMEOUT
+}
+
+enum IncidentSeverity {
+  Error
+  Warning
+  Info
+}
+
+enum IncidentStatus {
+  Open
+  In_Progress
+  Resolved
+}
+
+enum AuditStatus {
+  SUCCESS
+  WARNING
+  FAILED
+}
+
+enum EventProcessingStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
+}
+
+model User {
+  id          String      @id @default(uuid())
+  firebaseUid String?     @unique
+  email       String      @unique
+  passwordHash String?
+  displayName String
+  role        UserRole    @default(CUSTOMER)
+  status      UserStatus  @default(ACTIVE)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  documents   Document[]
+  orders      Order[]
+
+  @@index([email])
+  @@index([firebaseUid])
+}
+
+model Zone {
+  id          String   @id // 'ZONE_A', 'ZONE_B', 'ZONE_C'
+  name        String   // 'Zone A'
+  label       String   // 'Front Lobby'
+  description String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  kiosks      Kiosk[]
+}
+
+model Kiosk {
+  id          String      @id // 'K01' - 'K12'
+  name        String
+  zoneId      String
+  zone        Zone        @relation(fields: [zoneId], references: [id])
+  status      KioskStatus @default(Online)
+  ipAddress   String
+  apiKeyHash  String      // SHA-256 hash of provisioned secret
+  isRevoked   Boolean     @default(false)
+  lastSeen    DateTime    @default(now())
+  queueLength Int         @default(0)
+  totalPrints Int         @default(0)
+  temperature Float       @default(35.0)
+  paperLevel  Int         @default(100)
+  inkLevel    Int         @default(100)
+  coordX      Float       @default(0.0)
+  coordY      Float       @default(0.0)
+  coordZ      Float       @default(0.0)
+  currentJobId String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  printJobs   PrintJob[]
+  jobAttempts JobAttempt[]
+  incidents   Incident[]
+
+  @@index([zoneId])
+  @@index([status])
+}
+
+model Document {
+  id               String         @id @default(uuid())
+  ownerId          String
+  owner            User           @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  storageKey       String         @unique
+  originalFilename String
+  verifiedMimeType String
+  fileSize         Int            // bytes
+  pageCount        Int            @default(1)
+  status           DocumentStatus @default(READY)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  orders           Order[]
+
+  @@index([ownerId])
+}
+
+model Order {
+  id                  String        @id // '#NF-1048' or formatted order ID
+  customerId          String
+  customer            User          @relation(fields: [customerId], references: [id])
+  documentId          String
+  document            Document      @relation(fields: [documentId], references: [id])
+  kioskId             String
+  copies              Int           @default(1)
+  pageCount           Int
+  colorMode           ColorMode     @default(Color)
+  paperSize           PaperSize     @default(A4)
+  duplex              Boolean       @default(true)
+  subtotal            Decimal       @db.Decimal(10, 2)
+  tax                 Decimal       @db.Decimal(10, 2)
+  totalAmount         Decimal       @db.Decimal(10, 2)
+  currency            String        @default("USD")
+  status              OrderStatus   @default(Pending)
+  paymentStatus       PaymentStatus @default(Pending)
+  progress            Int           @default(0)
+  estimatedCompletion String?
+  timeline            Json?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  payments            Payment[]
+  printJob            PrintJob?
+
+  @@index([customerId])
+  @@index([kioskId])
+  @@index([status])
+  @@index([paymentStatus])
+}
+
+model Payment {
+  id                 String          @id @default(uuid())
+  orderId            String
+  order              Order           @relation(fields: [orderId], references: [id])
+  provider           PaymentProvider @default(SIMULATED)
+  providerPaymentRef String?
+  amount             Decimal         @db.Decimal(10, 2)
+  currency           String          @default("USD")
+  status             PaymentState    @default(PENDING)
+  idempotencyKey     String?         @unique
+  processedAt        DateTime?
+  createdAt          DateTime        @default(now())
+
+  @@index([orderId])
+  @@index([idempotencyKey])
+}
+
+model PrintJob {
+  id                  String         @id @default(uuid())
+  orderId             String         @unique
+  order               Order          @relation(fields: [orderId], references: [id])
+  kioskId             String?
+  kiosk               Kiosk?         @relation(fields: [kioskId], references: [id])
+  status              PrintJobStatus @default(QUEUED)
+  progress            Int            @default(0)
+  attemptCount        Int            @default(0)
+  claimLeaseExpiresAt DateTime?
+  version             Int            @default(1) // For optimistic locking & sequence enforcement
+  createdAt           DateTime       @default(now())
+  startedAt           DateTime?
+  completedAt         DateTime?
+
+  attempts            JobAttempt[]
+
+  @@index([status])
+  @@index([kioskId])
+}
+
+model JobAttempt {
+  id            String         @id @default(uuid())
+  jobId         String
+  job           PrintJob       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  kioskId       String
+  kiosk         Kiosk          @relation(fields: [kioskId], references: [id])
+  attemptNumber Int
+  outcome       AttemptOutcome
+  failureReason String?
+  startedAt     DateTime       @default(now())
+  finishedAt    DateTime?
+
+  @@index([jobId])
+  @@index([kioskId])
+}
+
+model Incident {
+  id          String           @id // 'INC-2041'
+  kioskId     String
+  kiosk       Kiosk            @relation(fields: [kioskId], references: [id])
+  zone        String
+  severity    IncidentSeverity
+  title       String
+  description String
+  status      IncidentStatus   @default(Open)
+  reportedBy  String
+  resolvedAt  DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([kioskId])
+  @@index([status])
+  @@index([severity])
+}
+
+model AuditLog {
+  id        String      @id // 'AUD-8832'
+  timestamp DateTime    @default(now())
+  actor     String
+  actorRole String
+  action    String
+  resource  String
+  status    AuditStatus @default(SUCCESS)
+  ipAddress String
+  payload   Json?
+
+  @@index([timestamp])
+  @@index([action])
+  @@index([actor])
+}
+
+model PaymentEvent {
+  id           String                @id @default(uuid())
+  eventId      String                @unique // Unique event ID from provider/sim
+  eventType    String
+  payload      Json
+  status       EventProcessingStatus @default(RECEIVED)
+  errorMessage String?
+  createdAt    DateTime              @default(now())
+  processedAt  DateTime?
+
+  @@index([eventId])
+  @@index([status])
+}
+
